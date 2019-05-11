@@ -1,0 +1,88 @@
+CREATE OR REPLACE FUNCTION LOAD_CSV ( p_table in varchar2, p_dir in varchar2 DEFAULT 'C:\Users\Desktop\stage\Realisa', P_FILENAME in varchar2, p_ignore_headerlines IN INTEGER DEFAULT 1,
+    p_delimiter in varchar2 default ';', p_optional_enclosed in varchar2 default '"' )
+    return number
+    is
+
+    l_input utl_file.file_type;
+    l_theCursor integer default dbms_sql.open_cursor;
+    l_lastLine varchar2(4000);
+    l_cnames varchar2(4000);
+    l_bindvars varchar2(4000);
+    l_status integer;
+    l_cnt number default 0;
+    l_rowCount number default 0;
+    l_sep char(1) default NULL;
+    L_ERRMSG varchar2(4000);
+    V_EOF BOOLEAN := false;
+
+    BEGIN
+
+    l_cnt := 1;
+        for TAB_COLUMNS in (select column_name, data_type from user_tab_columns where table_name=p_table order by column_id)
+        LOOP
+        l_cnames := l_cnames || tab_columns.column_name || ';';
+        l_bindvars := l_bindvars || case when tab_columns.data_type in ('DATE', 'TIMESTAMP(6)') then 'to_date(:b' || l_cnt || ',"YYYY-MM-DD HH24:MI:SS"),' else ':b'|| l_cnt || ';' END;
+        l_cnt := l_cnt + 1;
+        END LOOP;
+    l_cnames := rtrim(l_cnames,';');
+    L_BINDVARS := RTRIM(L_BINDVARS,';');
+
+    L_INPUT := UTL_FILE.FOPEN( P_DIR, P_FILENAME, 'r' );
+        IF p_ignore_headerlines > 0
+        THEN
+        BEGIN
+            FOR i IN 1 .. p_ignore_headerlines
+            LOOP
+            UTL_FILE.get_line(l_input, l_lastLine);
+            END LOOP;
+        EXCEPTION
+        WHEN NO_DATA_FOUND
+        THEN
+        v_eof := TRUE;
+        END;
+        END IF;
+
+    if not v_eof then
+    dbms_sql.parse( l_theCursor, 'insert into ' || p_table || '(' || l_cnames || ') values (' || l_bindvars || ')', dbms_sql.native );
+
+        LOOP
+        BEGIN
+        utl_file.get_line( l_input, l_lastLine );
+        exception
+        when NO_DATA_FOUND then
+        exit;
+        END;
+
+        if length(l_lastLine) > 0 then
+            for i in 1 .. l_cnt-1
+            LOOP
+
+            dbms_sql.bind_variable( l_theCursor, ':b'||i,
+            rtrim(rtrim(ltrim(ltrim(
+            REGEXP_SUBSTR(l_lastline,'(^|,)("[^"]*"|[^",]*)',1,i),p_delimiter),p_optional_enclosed),p_delimiter),p_optional_enclosed));
+            END LOOP;
+        BEGIN
+        l_status := dbms_sql.execute(l_theCursor);
+        l_rowCount := l_rowCount + 1;
+        exception
+        when OTHERS then
+        L_ERRMSG := SQLERRM;
+        insert into BADLOG ( TABLE_NAME, ERRM, data, ERROR_DATE )
+        values ( P_TABLE,l_errmsg, l_lastLine ,systimestamp );
+        END;
+        END IF;
+        END LOOP;
+
+    dbms_sql.close_cursor(l_theCursor);
+    utl_file.fclose( l_input );
+    commit;
+    END IF;
+    insert into IMPORT_HIST (FILENAME, TABLE_NAME, NUMREC, IMPORT_DATE)
+    values (P_FILENAME, P_TABLE,l_rowCount, sysdate);
+
+    UTL_FILE.FRENAME(P_DIR, P_FILENAME, P_DIR, REPLACE(P_FILENAME, '.csv', '_' || TO_CHAR(SYSDATE, 'DD_MON_RRRR_HH24_MI_SS_AM') || '.csv'));
+    commit;
+    RETURN L_ROWCOUNT;
+    END LOAD_CSV;
+
+
